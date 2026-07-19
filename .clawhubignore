@@ -1,0 +1,29 @@
+# 凭证文件
+.env
+.env.local
+config.local.json
+config.json
+*.key
+*.pem
+
+# 临时脚本
+_*.py
+_*.ps1
+_*.js
+
+# 运行时数据
+data/snapshots/
+data/recommended/
+data/user_context_*.json
+
+# 日志
+*.log
+logs/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
