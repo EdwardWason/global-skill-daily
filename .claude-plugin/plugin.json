@@ -1,0 +1,20 @@
+{
+  "name": "global-skill-daily",
+  "displayName": "Global Skill Daily",
+  "description": "每 3 天扫描全球两大 Skill 平台（ClawHub + SkillHub）合并去重，基于用户当前 agent 上下文做 10 维度推荐（3 组轮换：趋势/质量/用户），生成含跨平台生态洞察的全球 Skill 生态日报并三处存放推送。14 天跨维度去重避免多日推荐重合。",
+  "version": "1.1.0",
+  "license": "MIT-0",
+  "homepage": "https://github.com/trae-solo/global-skill-daily",
+  "author": "trae-solo",
+  "tags": ["skill-daily", "global", "cross-platform", "ecosystem", "radar", "insights"],
+  "category": "data-collection",
+  "entry": "global_skill_daily_executor.py",
+  "requires": {
+    "bins": ["python", "skillhub"],
+    "env": ["FEISHU_APP_ID", "FEISHU_APP_SECRET", "FEISHU_USER_OPEN_ID", "IMA_OPENAPI_CLIENTID", "IMA_OPENAPI_APIKEY"]
+  },
+  "triggers": {
+    "keywords": ["全球 skill 日报", "global skill daily", "跑一下全球 skill 推荐", "每 3 天 skill 推荐"],
+    "cron": "30 6 */3 * *"
+  }
+}
