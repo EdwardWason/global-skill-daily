@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ClawHub 自动生成
+.clawhub/
+skill-card.md
+
+# 运行时数据
+data/snapshots/*.json
+data/recommended/*.json
+data/recommended/*.md
+data/user_context_*.json
+
+# 临时脚本
+_*.py
+_*.ps1
+
+# 凭证
+.env
+.env.local
+config.local.json
+config.json
+
+# OS
+.DS_Store
+Thumbs.db
