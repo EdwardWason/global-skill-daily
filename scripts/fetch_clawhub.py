@@ -2,13 +2,16 @@
 """
 ClawHub Skill 抓取脚本
 基于 Convex API 翻页抓取 Top N Skill
+
+v1.5.0 自依赖改造：移除 `requests` 第三方依赖，改用标准库 urllib.request。
 """
-import requests
 import json
 import argparse
 import time
 import os
 import sys
+import urllib.request
+import urllib.error
 from datetime import datetime
 from pathlib import Path
 
@@ -19,7 +22,7 @@ DEFAULT_HEADERS = {
     "Content-Type": "application/json",
     "Origin": "https://clawhub.ai",
     "Referer": "https://clawhub.ai/",
-    "User-Agent": "clawhub-daily/1.0"
+    "User-Agent": "global-skill-daily/1.5.0"
 }
 
 
@@ -41,27 +44,31 @@ def call_list_public_page(cursor=None, num_items=50, sort="downloads", dir="desc
         "args": args,
         "format": "json"
     }
+    payload_bytes = json.dumps(payload).encode("utf-8")
 
     for attempt in range(max_retries):
         try:
-            resp = requests.post(
+            req = urllib.request.Request(
                 CONVEX_URL,
-                json=payload,
+                data=payload_bytes,
                 headers=DEFAULT_HEADERS,
-                timeout=20
+                method="POST",
             )
-            if resp.status_code == 429:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                status_code = resp.getcode()
+                body = resp.read().decode("utf-8")
+            if status_code == 429:
                 wait = 5 * (attempt + 1)
                 print(f"  [Rate limited] 等待 {wait}s 后重试...")
                 time.sleep(wait)
                 continue
-            if resp.status_code >= 500:
+            if status_code >= 500:
                 wait = 10 * (attempt + 1)
-                print(f"  [Server {resp.status_code}] 等待 {wait}s 后重试...")
+                print(f"  [Server {status_code}] 等待 {wait}s 后重试...")
                 time.sleep(wait)
                 continue
 
-            data = resp.json()
+            data = json.loads(body)
             if data.get('status') == 'success':
                 return data['value']
             else:
@@ -70,10 +77,33 @@ def call_list_public_page(cursor=None, num_items=50, sort="downloads", dir="desc
                     time.sleep(3)
                     continue
                 return None
-        except requests.exceptions.Timeout:
-            print(f"  [Timeout] 等待后重试...")
-            time.sleep(5)
-        except Exception as e:
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                wait = 5 * (attempt + 1)
+                print(f"  [Rate limited] 等待 {wait}s 后重试...")
+                time.sleep(wait)
+                continue
+            if e.code >= 500:
+                wait = 10 * (attempt + 1)
+                print(f"  [Server {e.code}] 等待 {wait}s 后重试...")
+                time.sleep(wait)
+                continue
+            print(f"  [HTTPError] {e.code}: {e.reason}")
+            if attempt < max_retries - 1:
+                time.sleep(3)
+                continue
+            return None
+        except urllib.error.URLError as e:
+            if "timed out" in str(e.reason).lower():
+                print(f"  [Timeout] 等待后重试...")
+                time.sleep(5)
+            else:
+                print(f"  [URLError] {e.reason}")
+                if attempt < max_retries - 1:
+                    time.sleep(3)
+                    continue
+                return None
+        except (OSError, json.JSONDecodeError) as e:
             print(f"  [Error] {e}")
             if attempt < max_retries - 1:
                 time.sleep(3)
@@ -117,7 +147,7 @@ def fetch_skills(target_num=200, sort="downloads", page_size=50):
 
 def save_snapshot(skills, date_str, output_dir):
     """保存快照到 JSON"""
-    output_path = Path(output_dir) / f"{date_str}.json"
+    output_path = Path(output_dir) / f"{date_str}.clawhub.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     snapshot = {

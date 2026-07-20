@@ -1,10 +1,16 @@
 """
-push_to_feishu.py — 飞书推送（Card 2.0 + 用户身份上传云文档）
+push_to_feishu.py — 飞书推送（Card 2.0 + 可选云文档上传）
 
-升级点（解决旧版技术债）：
+v1.5.0 自依赖改造：
+  - lark-cli 从「必需依赖」降级为「可选依赖」
+  - lark-cli 不可用时跳过云文档上传，仅推送 Card 2.0 卡片消息（含完整简报文本）
+  - 卡片消息通道完全自依赖（仅依赖 Python 标准库 urllib）
+  - 云文档上传仍是用户身份（铁律保留），但作为增强项
+
+升级点（历史）：
   1. Card 2.0 schema=2.0，markdown 元素（非 lark_md）
   2. 标题含具体数字（区分度）
-  3. 云文档用 lark-cli drive +upload 用户身份（非 create_document）
+  3. 云文档用 lark-cli drive +import 用户身份（非 create_document）
   4. template=green（与旧 blue/purple 差异化）
 
 环境变量：
@@ -14,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import urllib.request
@@ -49,19 +56,32 @@ def _get_tenant_token(app_id: str, app_secret: str) -> str | None:
 
 def upload_to_drive_via_lark_cli(md_path: Path, title: str) -> dict:
     """用 lark-cli drive +import 以用户身份将 .md 导入为飞书在线 docx 文档。
+
+    v1.2.0 安全修复：使用 argv list 而非 shell=True 字符串拼接，
+    避免 AST4/OH1 finding（shell 注入风险）。
+
     - lark-cli user 模式要求相对路径，需要 cwd 到 md 文件所在目录
-    - Windows 下 .cmd 需要 shell=True
+    - argv list 模式 + shutil.which 解析完整路径（Windows npm 全局命令是 .cmd，
+      subprocess 不自动解析 PATHEXT，必须 which 出 lark-cli.cmd 完整路径）
     - +import 比 +upload 更适合：upload 只存原文件（点击只能下载），import 转为在线 docx（点击可查看）
     """
     try:
+        lark_cli_bin = shutil.which("lark-cli")
+        if not lark_cli_bin:
+            return {"success": False, "error": "lark-cli not found in PATH"}
         md_dir = md_path.parent
         relative_name = md_path.name
-        # 用 +import --type docx 将 .md 转为飞书在线文档
-        cmd = f'lark-cli drive +import --file "{relative_name}" --name "{title}" --type docx'
+        # 用 argv list 而非字符串命令，避免 shell=True
+        cmd = [
+            lark_cli_bin, "drive", "+import",
+            "--file", relative_name,
+            "--name", title,
+            "--type", "docx",
+        ]
         result = subprocess.run(
             cmd,
-            capture_output=True, text=True, timeout=120, encoding="utf-8", shell=True,
-            cwd=str(md_dir)
+            capture_output=True, text=True, timeout=120, encoding="utf-8",
+            cwd=str(md_dir),
         )
         if result.returncode == 0:
             output = result.stdout
@@ -261,7 +281,8 @@ def push(json_path: Path, md_path: Path, date_str: str) -> dict:
     # 加载推荐结果
     result = json.loads(json_path.read_text(encoding="utf-8"))
 
-    # Step 1: 上传云文档（用户身份）
+    # Step 1: 上传云文档（用户身份，可选依赖 lark-cli）
+    # v1.5.0：lark-cli 不可用时降级为「仅卡片消息」，不阻断流程
     title = f"全球 Skill 生态日报 {date_str}"
     doc_url = None
     upload_result = upload_to_drive_via_lark_cli(md_path, title)
@@ -269,7 +290,8 @@ def push(json_path: Path, md_path: Path, date_str: str) -> dict:
         doc_url = upload_result.get("url")
         print(f"[push_to_feishu] uploaded to drive: {doc_url}")
     else:
-        print(f"[push_to_feishu] upload failed: {upload_result.get('error')}")
+        # 降级模式：lark-cli 不可用或上传失败，继续发卡片（卡片已含完整简报文本）
+        print(f"[push_to_feishu] [v1.5.0 降级模式] 跳过云文档上传，仅推送卡片消息。原因: {upload_result.get('error')}")
         # 失败不阻断，继续发卡片
 
     # Step 2: 获取 tenant token

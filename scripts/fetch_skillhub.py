@@ -1,23 +1,43 @@
 #!/usr/bin/env python3
 """
-SkillHub.cn 数据抓取脚本 v3.0
-7 排行榜 + 11 分类搜索 + 记忆关键词搜索
+SkillHub.cn 数据抓取脚本 v1.5.0（自依赖版）
+
+v1.5.0 改造：移除 `skillhub` CLI 外部二进制依赖，直接调用 SkillHub HTTP API。
+  - 排行榜：GET https://api.skillhub.cn/api/v1/showcase/{type}
+  - 搜索：   GET https://api.skillhub.cn/api/v1/search?q={kw}&limit={n}
+
+覆盖：
+  - 6 排行榜（hot / featured / newest / recommended / trending / paid）
+  - 11 分类搜索（用分类中文名作为关键词）
+  - 6 记忆关键词搜索
+
 目标覆盖：1000+ 条候选
 """
 import argparse
 import json
-import os
-import shutil
-import subprocess
 import sys
 import time
+import urllib.request
+import urllib.error
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 
-# 动态查找 skillhub CLI 路径（兼容不同安装位置）
-SKILLHUB_BIN = shutil.which("skillhub") or os.environ.get("SKILLHUB_BIN", "skillhub")
 
-RANKING_TYPES = ["hot", "newest", "trending", "featured", "recommended", "paid", "all"]
+# SkillHub API 端点（与 skillhub CLI 同源，从 CLI 源码 RANKING_ENDPOINTS 提取）
+SKILLHUB_API_HOST = "https://api.skillhub.cn"
+RANKING_ENDPOINTS = {
+    "hot": "/api/v1/showcase/hot",
+    "featured": "/api/v1/showcase/featured",
+    "newest": "/api/v1/showcase/newest",
+    "recommended": "/api/v1/showcase/recommended",
+    "trending": "/api/v1/showcase/trending",
+    "paid": "/api/v1/showcase/paid",
+}
+SEARCH_ENDPOINT = "/api/v1/search"
+
+# 兼容旧版 fetch_skillhub.py 中 7 个 RANKING_TYPES（"all" 没有对应端点，跳过）
+RANKING_TYPES = ["hot", "newest", "trending", "featured", "recommended", "paid"]
 
 CATEGORY_SLUGS = {
     "knowledge-management": "知识管理",
@@ -35,64 +55,40 @@ CATEGORY_SLUGS = {
 
 MEMORY_SEARCH_KEYWORDS = ["飞书", "Python", "定时任务", "审计", "财务", "GitHub"]
 
+DEFAULT_HEADERS = {
+    "User-Agent": "global-skill-daily/1.5.0",
+    "Accept": "application/json",
+}
 
-def run_cli(args, timeout=30):
-    """执行 skillhub CLI 命令"""
-    cmd = [SKILLHUB_BIN] + args
+
+def _http_get_json(url: str, timeout: int = 20) -> dict | list | None:
+    """发起 GET 请求，返回 JSON。失败返回 None。"""
+    req = urllib.request.Request(url, headers=DEFAULT_HEADERS, method="GET")
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return result.stdout.strip(), result.returncode
-    except Exception as e:
-        return "", 1
-
-
-def parse_json_output(output):
-    """从 CLI 输出中提取 JSON"""
-    if not output:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8")
+        return json.loads(body)
+    except urllib.error.HTTPError as e:
+        print(f"  [HTTP {e.code}] {e.reason}")
         return None
-    # 直接尝试解析
-    try:
-        return json.loads(output)
-    except json.JSONDecodeError:
-        pass
-    # 找 JSON 起始
-    for marker in ['{"skills"', '{"category"', '{"slug"', '{"query"', '[{']:
-        idx = output.find(marker)
-        if idx >= 0:
-            try:
-                return json.loads(output[idx:])
-            except json.JSONDecodeError:
-                # 尝试找到最后一个 } 的位置
-                depth = 0
-                end = idx
-                for i in range(idx, len(output)):
-                    if output[i] == '{' or output[i] == '[':
-                        depth += 1
-                    elif output[i] == '}' or output[i] == ']':
-                        depth -= 1
-                        if depth == 0:
-                            end = i + 1
-                            break
-                try:
-                    return json.loads(output[idx:end])
-                except:
-                    pass
-    return None
+    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as e:
+        print(f"  [Error] {e}")
+        return None
 
 
-def fetch_rankings():
-    """抓取 7 大排行榜"""
+def fetch_rankings() -> list:
+    """抓取 6 大排行榜（每个端点返回 {section, skills, total} 结构）。"""
     print("[1/3] 抓取排行榜...")
-    all_skills = {}
+    all_skills: dict[str, dict] = {}
 
     for rt in RANKING_TYPES:
         print(f"  {rt:15s}", end="", flush=True)
-        output, rc = run_cli(["skill", "rankings", "--type", rt], timeout=45)
-        data = parse_json_output(output)
+        url = SKILLHUB_API_HOST + RANKING_ENDPOINTS[rt]
+        data = _http_get_json(url, timeout=30)
 
         if data and isinstance(data, dict) and "skills" in data:
             skills = data["skills"]
-        elif data and isinstance(data, list):
+        elif isinstance(data, list):
             skills = data
         else:
             print(f" FAIL")
@@ -107,23 +103,24 @@ def fetch_rankings():
                 all_skills[slug].setdefault("_rankings", []).append(rt)
 
         print(f" OK ({len(skills)})")
-        time.sleep(0.3)
+        time.sleep(0.3)  # 礼貌限流
 
     return list(all_skills.values())
 
 
-def fetch_category_search():
-    """按 11 个分类搜索补充长尾"""
+def fetch_category_search() -> list:
+    """按 11 个分类搜索补充长尾。"""
     print("\n[2/3] 按分类搜索...")
-    all_skills = {}
+    all_skills: dict[str, dict] = {}
     for cat_slug, cat_zh in CATEGORY_SLUGS.items():
         print(f"  {cat_zh:10s}", end="", flush=True)
-        output, rc = run_cli(["search", cat_zh, "--json", "--search-limit", "20"], timeout=15)
-        data = parse_json_output(output)
+        params = urllib.parse.urlencode({"q": cat_zh, "limit": 20})
+        url = f"{SKILLHUB_API_HOST}{SEARCH_ENDPOINT}?{params}"
+        data = _http_get_json(url, timeout=15)
 
         if data and isinstance(data, dict) and "results" in data:
             results = data["results"]
-        elif data and isinstance(data, list):
+        elif isinstance(data, list):
             results = data
         else:
             print(f" FAIL")
@@ -142,20 +139,21 @@ def fetch_category_search():
     return list(all_skills.values())
 
 
-def fetch_keyword_search(keywords=None):
-    """按记忆关键词精准搜索"""
+def fetch_keyword_search(keywords=None) -> list:
+    """按记忆关键词精准搜索。"""
     kws = keywords or MEMORY_SEARCH_KEYWORDS
     print(f"\n[3/3] 关键词搜索（{len(kws)} 个）...")
-    all_skills = {}
+    all_skills: dict[str, dict] = {}
 
     for kw in kws:
         print(f"  {kw:10s}", end="", flush=True)
-        output, rc = run_cli(["search", kw, "--json", "--search-limit", "20"], timeout=15)
-        data = parse_json_output(output)
+        params = urllib.parse.urlencode({"q": kw, "limit": 20})
+        url = f"{SKILLHUB_API_HOST}{SEARCH_ENDPOINT}?{params}"
+        data = _http_get_json(url, timeout=15)
 
         if data and isinstance(data, dict) and "results" in data:
             results = data["results"]
-        elif data and isinstance(data, list):
+        elif isinstance(data, list):
             results = data
         else:
             print(f" FAIL")
@@ -175,17 +173,17 @@ def fetch_keyword_search(keywords=None):
 
 
 def normalize_skill(skill):
-    """标准化技能数据"""
+    """标准化技能数据。"""
     labels = skill.get("labels", {})
     if isinstance(labels, str):
         try:
             labels = json.loads(labels)
-        except:
+        except (json.JSONDecodeError, ValueError):
             labels = {}
 
     return {
         "slug": skill.get("slug", ""),
-        "name": skill.get("name", ""),
+        "name": skill.get("name", skill.get("displayName", "")),
         "ownerName": skill.get("ownerName", ""),
         "version": skill.get("version", ""),
         "source": skill.get("source", ""),
@@ -239,7 +237,6 @@ def main():
             all_skills[slug] = normalize_skill(s)
             all_skills[slug]["_source"] = "category_search"
         elif slug and slug in all_skills:
-            # 补充分类搜索来源
             if "category_search" not in all_skills[slug].get("_source", ""):
                 all_skills[slug]["_source"] = all_skills[slug].get("_source", "") + "+category_search"
 
@@ -255,7 +252,7 @@ def main():
     print(f"\n合并去重后: {len(skills)} 个独立技能")
 
     # 保存
-    output_path = Path(args.output) / f"{date_str}.json"
+    output_path = Path(args.output) / f"{date_str}.skillhub.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     snapshot = {
